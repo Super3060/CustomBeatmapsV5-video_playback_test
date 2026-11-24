@@ -73,7 +73,7 @@ namespace CustomBeatmaps.CustomData
         /// </summary>
         public int Level
         {
-            get => Tags.Level; 
+            get => Tags.Level;
             set => Tags.Level = value;
         }
 
@@ -82,7 +82,7 @@ namespace CustomBeatmaps.CustomData
         /// </summary>
         public string FlavorText
         {
-            get => Tags.FlavorText; 
+            get => Tags.FlavorText;
             set => Tags.FlavorText = value;
         }
 
@@ -148,12 +148,12 @@ namespace CustomBeatmaps.CustomData
         /// IS the beatmap local???
         /// </summary>
         public bool IsLocal { get; private set; }
-        
+
         /// <summary>
         /// File location of this Beatmap
         /// </summary>
         public string BeatmapPath { get; private set; }
-        
+
         /// <summary>
         /// The Directory this Beatmap is in
         /// </summary>
@@ -168,6 +168,11 @@ namespace CustomBeatmaps.CustomData
         /// Points to the audio file associated with the beatmap
         /// </summary>
         public string AudioPath { get; private set; }
+
+        /// <summary>
+        /// Absolute path to the video referenced by this beatmap's osu! Video event, when present.
+        /// </summary>
+        public string VideoPath { get; private set; }
 
         public Guid GUID = Guid.Empty;
 
@@ -238,7 +243,7 @@ namespace CustomBeatmaps.CustomData
                 stream.Position = 0;
 
                 SongName = GetBeatmapProp(text, "TitleUnicode", BeatmapPath);
-                
+
                 Artist = GetBeatmapProp(text, "Artist", BeatmapPath);
                 Creator = GetBeatmapProp(text, "Creator", BeatmapPath);
 
@@ -261,7 +266,6 @@ namespace CustomBeatmaps.CustomData
                     }
                 }
 
-
                 var bmapVer = GetBeatmapProp(text, "Version", BeatmapPath);
                 Difficulty = bmapVer;
 
@@ -270,6 +274,11 @@ namespace CustomBeatmaps.CustomData
                 var realPath = audio.Contains("/") ? audio.Substring(audio.LastIndexOf("/") + 1, audio.Length - (audio.LastIndexOf("/") + 1)) : audio;
                 //AudioPath = $"{DirectoryPath}\\{realPath}";
                 AudioPath = $"{realPath}";
+
+                // osu! stores a video as an Events entry with a beatmap-relative filename.
+                // Resolve it before the game's beatmap parser sees the text, because the
+                // temporary/custom beatmap location is not necessarily the package folder.
+                text = ResolveVideoEventPath(text);
 
                 if (TryGetBeatmapProp(text, "Tags", BeatmapPath, out var tags))
                 {
@@ -290,7 +299,7 @@ namespace CustomBeatmaps.CustomData
                     if (!TrySetBeatmapProp(ref sw, text, "Source", $"\r\nTags:"))
                         TrySetBeatmapProp(ref sw, text, "Version", $"\r\nTags:");
                 }
-                
+
                 sw.Flush();
                 sr.Close();
                 stream.Close();
@@ -306,11 +315,47 @@ namespace CustomBeatmaps.CustomData
             return true;
         }
 
+        private string ResolveVideoEventPath(string beatmapText)
+        {
+            var eventsSection = Regex.Match(beatmapText, @"(?ims)^\[Events\]\s*\r?\n(?<events>.*?)(?=^\[|\z)");
+            if (!eventsSection.Success)
+                return beatmapText;
+
+            // Support both named osu! events (Video,...) and the legacy numeric event type (1,...).
+            // Background events use type 0 and are deliberately not matched.
+            var videoEvent = Regex.Match(eventsSection.Groups["events"].Value,
+                @"(?im)^\s*(?:Video|1)\s*,\s*[^,\r\n]*\s*,\s*""(?<filename>[^""]+)""");
+            if (!videoEvent.Success)
+                return beatmapText;
+
+            try
+            {
+                var filename = videoEvent.Groups["filename"].Value.Replace('/', Path.DirectorySeparatorChar);
+                var videoPath = Path.IsPathRooted(filename)
+                    ? Path.GetFullPath(filename)
+                    : Path.GetFullPath(Path.Combine(DirectoryPath, filename));
+
+                // Leave the original event untouched when its referenced file is missing.
+                if (!File.Exists(videoPath))
+                    return beatmapText;
+
+                VideoPath = videoPath;
+                var absoluteFilenameIndex = eventsSection.Groups["events"].Index + videoEvent.Groups["filename"].Index;
+                return beatmapText.Substring(0, absoluteFilenameIndex)
+                    + videoPath
+                    + beatmapText.Substring(absoluteFilenameIndex + videoEvent.Groups["filename"].Length);
+            }
+            catch (Exception ex)
+            {
+                ScheduleHelper.SafeLog($"Unable to resolve custom beatmap video: {ex.Message}");
+                return beatmapText;
+            }
+        }
+
         public override string ToString()
         {
             return $"{{{SongName} by {Artist} ({Difficulty}) mapped {Creator} ({SongPath})}}";
         }
-
 
         public void SetBeatmapJson()
         {
